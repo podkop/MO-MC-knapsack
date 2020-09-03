@@ -12,8 +12,12 @@ class knapsack_gurobi(knaps_base.knapsack_base):
         "integer": gbp.GRB.INTEGER
         }
     
-    def _create_model(self, name=""):
+    
+    def _create_model(self, name="", max_time = None):
         self._model = gbp.Model(name="")
+        self._model.params.NumericFocus=3
+        if max_time is not None:
+            self._model.params.TimeLimit = max_time
 
 ## Adding a variable: shape=None => single; otherwise multidimensional
 #  If shape is int (including 1), then create an 1D-vector variable
@@ -107,6 +111,12 @@ class knapsack_gurobi(knaps_base.knapsack_base):
             return self._model.addConstr(
                 sum( wi*vi for vi, wi in zip(var_l,w_l) ) == rhs
                 )
+## Set upper bound for a given model's variable. None -> ub=inf
+    def _set_ub(self, v, ub = None):
+        if ub is None:
+            ub = gbp.GRB.INFINITY
+        v.ub = ub
+
 
 ## Returns last solution (binary bars): np. matrix or list of np. vectors
     def _sol_x(self):
@@ -117,7 +127,7 @@ class knapsack_gurobi(knaps_base.knapsack_base):
 
 ## Returns True if optimal solution was found, otherwise False
     def _q_opt(self):
-        if self._model.Status == 2:
+        if self._model.Status in [2,9]:
             return True
         else:
             return False

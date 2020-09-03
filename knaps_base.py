@@ -20,12 +20,25 @@ def obj_dict2vect(d):
     if k:
         return np.array([d[ki] for ki in range(k)])
     return np.array([])
-    
+
+# Given a numpy array of coefficients, calculate the factor (multiplicator)
+# for normalization of coefficients to avoid big range
+def normalize_factor(coefs):
+    return 1 / (
+        max( coefs.max(), -coefs.min() )
+        )
+
 # Single objective - by linear form, multi-objective - by dummy constraints
-# - all objectives are internally represented as minimization
-#   obj2out - function (model's objectives dict) -> (meaningful objectives dict)
+# - all obj. coeffs are given as minimization; internally normalized if needed
+# - input (scalariz. params) and output (obj. vectors, ranges) are normalized
+# - when saving or copyting between models, range information is re-normalized
+#   "vector"_out - factor out normalization, then transform to meaningful
+#   obj2out - function (model's objectives dict without normalization) 
+#                -> (meaningful objectives dict)
 #   var_shape: tuple (nr. objects, nr. choices) or [for each obj: nr. choices]
-# payoff_status: True is range was calculated, "proper" if using eps-constraint
+#   payoff_status: True is range was calculated, "proper" if using eps-constraint
+#   normalize: normalize all model coefficients to avoid issues of big ranges
+#       #!todo: currently implemented only for rectangular problem type
 class knapsack_base(ABC):
     _var_types = { # Keywords naming variable types
         "continuous": None, 
@@ -38,9 +51,18 @@ class knapsack_base(ABC):
     _max_scale_mult = 1000
     # Default value of obj. value (%) for degenerate objectives
     _degen_prc = 100
-    def __init__(self, var_shape, obj2out = copy.copy, name = ""):
+    # Constant for proper efficiency
+    _rho = 0.0001
+    def __init__(self, 
+                 var_shape, 
+                 obj2out = copy.copy, 
+                 name = "",
+                 normalize = True,
+                 max_time = None # optimization time limit
+                 ):
         self._shape_x = var_shape
         self._obj2out = obj2out
+        self._normalize = normalize
         # If same nr. of choices for each object
         self._q_rectang = True if type(var_shape) == tuple else False
         # nr. of objects
@@ -59,7 +81,7 @@ class knapsack_base(ABC):
         # Dummy variable for ASF
         self._dummy_asf = None
         ## initialize solver's model
-        self._create_model(name)
+        self._create_model(name, max_time = max_time)
         if self._q_rectang:
             self._vars_x = self._add_var(var_shape, vtype = "binary")
         else:
@@ -72,7 +94,7 @@ class knapsack_base(ABC):
         self._upd()
 
 ### Solver's interface functions    
-    def _create_model(self, name=""):
+    def _create_model(self, name="", max_time = None):
         pass
 ## Adding a variable: shape=None => single; otherwise multidimensional
 #  If shape is int (including 1), then create an 1D-vector variable
@@ -111,7 +133,7 @@ class knapsack_base(ABC):
 ## Returns last solution (binary bars): np. matrix or list of np. vectors
     def _sol_x(self):
         pass
-## Returns True if optimal solution was found, otherwise False
+## Returns True if optimal/approximate solution was found, otherwise False
     def _q_opt(self):
         pass
 ## Returns optimization status
@@ -140,7 +162,12 @@ class knapsack_base(ABC):
         if num_k:
             return list(range(num_k))
         return names
-
+    # Given an objective (sub-)vector as dict, returns it without normalization
+    def _factor_out(self, obj):
+        return {
+            ki: vi / self._mobjs[ki]["factor"] 
+                for ki, vi in obj.items()
+                }
     def add_constr(self, coeffs, rhs = 0.0, name = None):
         if name is None:
             name = self._next_constr_key
@@ -164,9 +191,20 @@ class knapsack_base(ABC):
             rhs = [rhs]
         r_ids = [0 for _ in range(self._n)] if len(rhs) == 1 \
             else list(range(self._n))
+        # normalization if needed
+        if self._normalize and self._q_rectang:
+            factors = [
+                normalize_factor(coeffs[:,j]) 
+                    for j in range(coeffs.shape[1])
+                       ]
+        else:
+            factors = [1.0 for _ in range(coeffs.shape[1])]
         self._col_constrs = [
             self._add_col_constr(
-                coeffs[:,c_ids[j]], j, rhs[r_ids[j]], sense
+                coeffs[:,c_ids[j]] * factors[c_ids[j]], 
+                j, 
+                rhs[r_ids[j]] * factors[c_ids[j]], 
+                sense
                 )
                     for j in range(self._n)
             ]
@@ -174,13 +212,21 @@ class knapsack_base(ABC):
     def add_obj(self, coeffs, name = None, u_bound = None,
                 save_coeffs = True):
         self._payoff_status = False # reset range information
+        # Setting name, checking for duplicate
         if name is None:
             name = self._next_obj_key
             self._next_obj_key += 1
         if name in self._mobjs:
             print(f"*** Re-writing objective \"{name}\" ***")
             self.del_obj(name)
+        # Init the structure stoing the objective function
         o = self._mobjs[name] = {}
+        # Normalization factor if needed
+        if self._normalize and self._q_rectang:
+            o["factor"] = normalize_factor(coeffs)
+            coeffs *= o["factor"]
+        else:
+            o["factor"] = 1.0
         if save_coeffs:
             o["coeffs"] = coeffs
         # Additional args when creating the dummy var
@@ -213,12 +259,14 @@ class knapsack_base(ABC):
             b = {i: b[i] for i in sorted(self._mobjs.keys())}
         for ki, vi in b.items():
             self._set_ub(self._mobjs[ki]["var"], vi)
+        self._upd()
 
     def _reset_obj_bounds(self, names = None):
         if names is None:
             names = self._mobjs.keys()
         for ki in names:
             self._set_ub(self._mobjs[ki]["var"], self._mobjs[ki]["bound"])
+        self._upd()
     
     def _sol_y(self, coeffs, x = None):
         if x is None:
@@ -279,19 +327,21 @@ class knapsack_base(ABC):
         if q_scale:
             w={ ki: wi*self._scale[ki] for ki, wi in w.items() }
         # Init objective bounds dictionary, check degenerate objectives
-        obj_bounds = {} if obj_bounds is None else obj_bounds.copy()
+        temp_obj_bounds = {} if obj_bounds is None else obj_bounds.copy()
         if degen_treat == "bound":
             for ni in list(w):
                 if self._mobjs[ni]["degen"]:
-                    obj_bounds[ni] = self._nadir[ni]
+                    temp_obj_bounds[ni] = self._nadir[ni]
                     del(w[ni])
         self._last_scalariz = {
-            "type": "asf", "ref": ref, "w": w, "obj_bounds": obj_bounds }
+            "type": "asf", "ref": ref, "w": w, "obj_bounds": temp_obj_bounds }
         # create scalar obj
-        if self._dummy_asf is not None:
-            self._remove(self._dummy_asf) 
-        self._dummy_asf = self._add_var(lb_inf=True)
-        self._upd()
+        # if self._dummy_asf is not None:
+        #     self._remove(self._dummy_asf)
+        #     self._upd()
+        if self._dummy_asf is None:
+            self._dummy_asf = self._add_var(lb_inf=True)
+            self._upd()
         dummy_constrs = [
             self._add_constr_list(
                 [self._dummy_asf, self._mobjs[ki]["var"]],
@@ -300,10 +350,13 @@ class knapsack_base(ABC):
                 )
                 for ki, wi in w.items()
             ]
-        self._setobj_list( [self._dummy_asf], [1.0] )
-        self._obj_bounds(obj_bounds)
+        self._setobj_list( 
+            [self._dummy_asf] + [self._mobjs[ki]["var"] for ki in w], 
+            [1.0] + [vi * self._rho for ki, vi in w.items()] 
+            )
+        self._obj_bounds(temp_obj_bounds)
         self._optimize()
-        if obj_bounds is not None:
+        if len(temp_obj_bounds)>0:
             self._reset_obj_bounds()
         self._remove(dummy_constrs)
         return self._result()
@@ -325,6 +378,7 @@ class knapsack_base(ABC):
         return self._result()
         
     ## Calculate vector for scaling weights,
+    #  check for degeneracy
     def _calc_scale(self, ideal, nadir):
         self._scale = { 
             ni: 1/(nadir[ni]-ideal[ni]) for ni in ideal
@@ -350,6 +404,7 @@ class knapsack_base(ABC):
         #!del? self._asf_k = 0
         ## calculating approximate payoff matrix
         for ni in self._range_names:
+            print("!\nSolving objective",ni,"\n!")
             self.solve_eps(ni)
             self._payoff_approx.append([
                 self._sol_y(self._mobjs[ni]["coeffs"])
@@ -370,11 +425,12 @@ class knapsack_base(ABC):
             self._payoff = self._payoff_approx.copy()
         self._calc_scale(self._ideal, self._nadir)
         # ideal and nadir in output format
-        self.out_ideal = self._obj2out(self._ideal)
-        self.out_nadir = self._obj2out(self._nadir)
+        self.out_ideal = self._obj2out( self._factor_out(self._ideal) )
+        self.out_nadir = self._obj2out( self._factor_out(self._nadir) )
         self._payoff_status = "proper" if q_proper else True
         
-    ## 2 functions for copying Efficient range from other models
+    ## 2 functions for copying Efficient range between models
+    #  taking into account normalization
     def get_range(self):
         dct = {}
         for attri in ["_ideal", "_nadir", "out_ideal", "out_nadir",
@@ -388,18 +444,40 @@ class knapsack_base(ABC):
         dct["degen_list"] = [
             ni for ni, oi in self._mobjs.items() if oi["degen"]
             ]
+        dct["factors"] = {
+            ki: self._mobjs[ki]["factor"] for ki in self._range_names
+            }
         return dct
     
     def set_range(self,dct):
-        for attri in ["_ideal", "_nadir", "out_ideal", "out_nadir",
-                      "_range_names", "_k_range", "_scale",
-                      "_payoff_status", "_payoff", "_payoff_approx"]:
-            vi = dct[attri]
-            if hasattr(vi,"copy"):
-                setattr(self,attri,vi.copy())
+        for attri in ["out_ideal", "out_nadir",
+                      "_range_names", "_k_range",
+                      "_payoff_status"]:
+            di = dct[attri]
+            if hasattr(di,"copy"):
+                setattr(self,attri,di.copy())
             else:
-                setattr(self,attri,vi)
-        for ni,oi in self._mobjs.items():
+                setattr(self,attri,di)
+        # Re-normalizing objective values
+        for attri in ["_ideal", "_nadir"]:
+            di = dct[attri]
+            setattr(self, attri, {
+                ki: vi / dct["factors"][ki] * self._mobjs[ki]["factor"]
+                    for ki, vi in di.items()
+                    } )
+        self._scale = {
+            ki: vi * dct["factors"][ki] / self._mobjs[ki]["factor"]
+                for ki, vi in dct["_scale"].items()
+                }
+        for attri in ["_payoff", "_payoff_approx"]:
+            di = dct[attri]
+            setattr(self, attri, [
+                [
+                rowi[i] / dct["factors"][ki] * self._mobjs[ki]["factor"]
+                    for i, ki in enumerate(self._range_names)
+                    ] for rowi in di
+                ] )
+        for ni, oi in self._mobjs.items():
             if ni in dct["degen_list"]:
                 oi["degen"] = True
             else:
@@ -455,7 +533,7 @@ class knapsack_base(ABC):
             objs = { 
                 ni: np.einsum("ij,ij->",self._mobjs[ni]["coeffs"], x) 
                     for ni in names }
-        obj_out = self._obj2out(objs)
+        obj_out = self._obj2out( self._factor_out(objs) )
         # out objectives -> percentage in [out nadir, out ideal] 
         if self._payoff_status:
             idl, ndr = self.out_ideal, self.out_nadir
