@@ -1,5 +1,5 @@
 import gurobipy as gbp
-import my.mpsolvers.knaps_base as knaps_base
+import knaps_base
 import numpy as np
 
 ### All variables are of MVar type
@@ -13,11 +13,13 @@ class knapsack_gurobi(knaps_base.knapsack_base):
         }
     
     
-    def _create_model(self, name="", max_time = None):
+    def _create_model(self, name="", max_time = None, **kwargs):
         self._model = gbp.Model(name="")
         self._model.params.NumericFocus=3
         if max_time is not None:
             self._model.params.TimeLimit = max_time
+        if "mute" in kwargs:
+            self._model.params.outputflag = 0
 
 ## Adding a variable: shape=None => single; otherwise multidimensional
 #  If shape is int (including 1), then create an 1D-vector variable

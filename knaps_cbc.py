@@ -1,5 +1,5 @@
 import mip
-import my.mpsolvers.knaps_base as knaps_base
+import knaps_base
 import numpy as np
 import time
 
@@ -13,7 +13,7 @@ class knapsack_cbc(knaps_base.knapsack_base):
     # Maximum duration of optimization process
     _max_time = mip.INF
     
-    def _create_model(self, name="", max_time = None):
+    def _create_model(self, name="", max_time = None, **kwargs):
         self._model = mip.Model(solver_name = "CBC")
         if max_time is not None:
             self._max_time = max_time
@@ -108,14 +108,14 @@ class knapsack_cbc(knaps_base.knapsack_base):
         elif sense == ">=" or sense == ">":
             return self._model.add_constr(
                     mip.xsum(
-                        coeff_col[i,0] * self._vars_x[i][j] 
+                        coeff_col[i] * self._vars_x[i][j] 
                             for i in range(self._m) )
                     >= rhs
                 )
         elif sense == "=" or sense == "==":
             return self._model.add_constr(
                     mip.xsum(
-                        coeff_col[i,0] * self._vars_x[i][j] 
+                        coeff_col[i] * self._vars_x[i][j] 
                             for i in range(self._m) )
                     >= rhs
                 )

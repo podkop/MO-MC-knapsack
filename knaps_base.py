@@ -58,7 +58,8 @@ class knapsack_base(ABC):
                  obj2out = copy.copy, 
                  name = "",
                  normalize = True,
-                 max_time = None # optimization time limit
+                 max_time = None, # optimization time limit
+                 **kwargs
                  ):
         self._shape_x = var_shape
         self._obj2out = obj2out
@@ -81,7 +82,7 @@ class knapsack_base(ABC):
         # Dummy variable for ASF
         self._dummy_asf = None
         ## initialize solver's model
-        self._create_model(name, max_time = max_time)
+        self._create_model(name, max_time = max_time, **kwargs)
         if self._q_rectang:
             self._vars_x = self._add_var(var_shape, vtype = "binary")
         else:
@@ -94,7 +95,7 @@ class knapsack_base(ABC):
         self._upd()
 
 ### Solver's interface functions    
-    def _create_model(self, name="", max_time = None):
+    def _create_model(self, name="", max_time = None, **kwargs):
         pass
 ## Adding a variable: shape=None => single; otherwise multidimensional
 #  If shape is int (including 1), then create an 1D-vector variable
@@ -152,6 +153,7 @@ class knapsack_base(ABC):
     def _optimize(self):
         pass
 
+## Utilities
     # Convert input to a list of names of objectives
     def _parse_names(self, names = None):
         if names is None:
@@ -168,7 +170,27 @@ class knapsack_base(ABC):
             ki: vi / self._mobjs[ki]["factor"] 
                 for ki, vi in obj.items()
                 }
+    # Transform coefficients array to an acceptable format
+    def _parse_coeffs(self,c):
+        if self._q_rectang:
+            if not isinstance(c, np.ndarray):
+                return np.array(c)
+            else:
+                return c
+        if not isinstance(c[0], np.ndarray):
+            return [np.array(vi) for vi in c]
+        else:
+            return c
+    # Given variables array, returns the list of assignments
+    def bin2int(self,x):
+        return [
+            np.where(vi > 0.999)[0][0] for vi in x
+            
+            ]
+        
+## Main functions
     def add_constr(self, coeffs, rhs = 0.0, name = None):
+        coeffs = self._parse_coeffs(coeffs)
         if name is None:
             name = self._next_constr_key
             self._next_constr_key += 1
@@ -182,35 +204,43 @@ class knapsack_base(ABC):
             self._upd()
 
     ## Coeffs can be 1 column, then it is populated; rhs can be value o [value]
-    def add_col_constrs(self, coeffs, rhs = 0.0, sense = "<="):
-        # parsing coefficients, c_ids controls population
-        c_ids = [0 for _ in range(self._n)] if coeffs.shape[1] == 1 \
-            else list(range(self._n))
-        # parsing rhs, r_ids controls population
+    #  col_ids = list of column nrs to enforce constraints on (None = to all columns)
+    def add_col_constrs(self, coeffs, rhs = 0.0, sense = "<=", col_ids = None):
+        if not isinstance(coeffs, np.ndarray):
+            coeffs = np.array(coeffs)
+        # col_ids = list of columns of vars to enforce constraints to
+        if col_ids is None:
+            col_ids = list(range(self._n))
+        n_coef_cols = coeffs.shape[1]
+        # parsing coefficients, coeff_ids controls (coeff. column -> var. column)
+        coeff_ids = [0 for _ in col_ids] if n_coef_cols == 1 \
+            else list(range(len(col_ids)))
+        # parsing rhs, r_ids controls (r.h.s. value -> var. column)
         if not hasattr(rhs,"__len__"):
             rhs = [rhs]
-        r_ids = [0 for _ in range(self._n)] if len(rhs) == 1 \
-            else list(range(self._n))
+        r_ids = [0 for _ in col_ids] if len(rhs) == 1 \
+            else list(range(len(col_ids)))
         # normalization if needed
         if self._normalize and self._q_rectang:
             factors = [
                 normalize_factor(coeffs[:,j]) 
-                    for j in range(coeffs.shape[1])
+                    for j in range(n_coef_cols)
                        ]
         else:
-            factors = [1.0 for _ in range(coeffs.shape[1])]
+            factors = [1.0 for _ in range(n_coef_cols)]
         self._col_constrs = [
             self._add_col_constr(
-                coeffs[:,c_ids[j]] * factors[c_ids[j]], 
+                coeffs[:,coeff_ids[ij]] * factors[coeff_ids[ij]], 
                 j, 
-                rhs[r_ids[j]] * factors[c_ids[j]], 
+                rhs[r_ids[ij]] * factors[coeff_ids[ij]], 
                 sense
                 )
-                    for j in range(self._n)
+                    for ij,j in enumerate(col_ids)
             ]
 
     def add_obj(self, coeffs, name = None, u_bound = None,
                 save_coeffs = True):
+        coeffs = self._parse_coeffs(coeffs)
         self._payoff_status = False # reset range information
         # Setting name, checking for duplicate
         if name is None:
@@ -233,7 +263,7 @@ class knapsack_base(ABC):
         var_args = {"lb_inf": True}
         o["bound"] = u_bound
         if u_bound is not None:
-            var_args["ub"] = u_bound 
+            var_args["ub"] = u_bound * o["factor"]
         o["var"] = self._add_var(**var_args)
         self._upd()
         o["constr"] = name
@@ -254,21 +284,27 @@ class knapsack_base(ABC):
     #  Can be temporarily changed and then reset to initial
     
     ## Bounds are given as a vector, or as {names:bounds}. None -> inf
+    #  They are stored not normalized
     def _obj_bounds(self, b):
         if not isinstance(b,dict):
             b = {i: b[i] for i in sorted(self._mobjs.keys())}
         for ki, vi in b.items():
-            self._set_ub(self._mobjs[ki]["var"], vi)
+            self._set_ub(self._mobjs[ki]["var"], vi * self._mobjs[ki]["factor"])
+            self._mobjs[ki]["bound"] = vi
         self._upd()
 
     def _reset_obj_bounds(self, names = None):
         if names is None:
             names = self._mobjs.keys()
         for ki in names:
-            self._set_ub(self._mobjs[ki]["var"], self._mobjs[ki]["bound"])
+            self._set_ub(
+                self._mobjs[ki]["var"], 
+                self._mobjs[ki]["bound"] * self._mobjs[ki]["factor"]
+                )
         self._upd()
     
     def _sol_y(self, coeffs, x = None):
+        coeffs = self._parse_coeffs(coeffs)
         if x is None:
             x = self._sol_x()
         return np.dot(np.concatenate(coeffs), np.concatenate(x))
@@ -290,7 +326,7 @@ class knapsack_base(ABC):
         if degen_treat == "bound":
             for ni in list(w):
                 if self._mobjs[ni]["degen"]:
-                    obj_bounds[ni] = self._nadir[ni]
+                    obj_bounds[ni] = self._nadir[ni] / self._mobjs[ni]["factor"]
                     del(w[ni])
         if q_scale:
             w={ ki: wi*self._scale[ki] for ki, wi in w.items() }                    
@@ -331,7 +367,7 @@ class knapsack_base(ABC):
         if degen_treat == "bound":
             for ni in list(w):
                 if self._mobjs[ni]["degen"]:
-                    temp_obj_bounds[ni] = self._nadir[ni]
+                    temp_obj_bounds[ni] = self._nadir[ni] / self._mobjs[ni]["factor"]
                     del(w[ni])
         self._last_scalariz = {
             "type": "asf", "ref": ref, "w": w, "obj_bounds": temp_obj_bounds }
@@ -404,7 +440,7 @@ class knapsack_base(ABC):
         #!del? self._asf_k = 0
         ## calculating approximate payoff matrix
         for ni in self._range_names:
-            print("!\nSolving objective",ni,"\n!")
+            # print("!\nSolving objective",ni,"\n!")
             self.solve_eps(ni)
             self._payoff_approx.append([
                 self._sol_y(self._mobjs[ni]["coeffs"])
