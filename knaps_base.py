@@ -39,6 +39,7 @@ def normalize_factor(coefs):
 #   payoff_status: True is range was calculated, "proper" if using eps-constraint
 #   normalize: normalize all model coefficients to avoid issues of big ranges
 #       #!todo: currently implemented only for rectangular problem type
+#       #!todo: when parsing weights as list, order of objectives is different in solve_lin  
 class knapsack_base(ABC):
     _var_types = { # Keywords naming variable types
         "continuous": None, 
