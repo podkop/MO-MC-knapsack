@@ -122,7 +122,7 @@ solve_asf(
   )
 ``` 
 
-# Deficiencies if this package
+# Deficiencies of this package
 
 The author is not a professional software developer and barely follows good practices of programming.
 
