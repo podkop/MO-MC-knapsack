@@ -24,9 +24,8 @@ def obj_dict2vect(d):
 # Given a numpy array of coefficients, calculate the factor (multiplicator)
 # for normalization of coefficients to avoid big range
 def normalize_factor(coefs):
-    return 1 / (
-        max( coefs.max(), -coefs.min() )
-        )
+    abs_max = max( coefs.max(), -coefs.min() )
+    return 1 if abs_max==0 else 1/abs_max
 
 # Single objective - by linear form, multi-objective - by dummy constraints
 # - all obj. coeffs are given as minimization; internally normalized if needed
